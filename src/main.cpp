@@ -3,12 +3,18 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Preferences.h>
+#include <DHT.h>
 
 // Pin Definitions
-#define ENCODER_CLK 18
-#define ENCODER_DT  19
-#define ENCODER_SW  5
-#define BUZZER_PIN  23
+#define ENCODER_CLK 18 //Out A
+#define ENCODER_DT  19 //Out B
+#define ENCODER_SW  5  //Switch 
+#define BUZZER_PIN  23 
+#define DHTPIN 4
+
+//Humidity sensor
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
 
 // OLED Settings
 #define SCREEN_WIDTH 128
@@ -25,6 +31,8 @@ Mode currentMode = CLOCK;
 int alarmHour = 7;
 int alarmMin = 0;
 int lastClkState;
+unsigned long lastDHTRead = 0;
+float h = 0, t = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -35,16 +43,17 @@ void setup() {
   pinMode(ENCODER_SW, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
 
-  //set RTC time
-  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-
   // Initialize I2C Devices
   if (!rtc.begin()) {
     Serial.println("Couldn't find RTC");
     while (1);
   }
 
-  Serial.println("Testing!");
+  //set RTC time (only need this line uncommented if setting first time ever on RTC module)
+  //rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+
+   dht.begin();
+
   
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println("SSD1306 not found");
@@ -82,26 +91,52 @@ void updateDisplay(DateTime now) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  // Show Temperature (Top Right)
+  // Only read DHT every 2 seconds to prevent lag
+  if (millis() - lastDHTRead > 2000) {
+    h = dht.readHumidity();
+    t = dht.readTemperature();
+    lastDHTRead = millis();
+  }
+  // Show Temperature (Top Left)
+  if (isnan(h) || isnan(t)) {
+    Serial.println("Failed to read from DHT sensor!");
+    return;
+  }
   display.setTextSize(1);
-  display.setCursor(85, 0);
-  display.print(((rtc.getTemperature() * (9/5)) + 32), 1); //display fahrenheit
+  display.setCursor(1, 0); //upper left
+  //second parameter is decimal place 
+  display.print(((t * (9.0/5.0)) + 32), 1); //display fahrenheit
   display.print("F");
+
+  //Show Humidity (Top Right)
+  display.setTextSize(1);
+  display.setCursor(84, 0); //upper right
+  display.print(h, 0); //display humidity
+  display.print("%");
+
+  // Main Time Display (12-Hour Format)
+  int displayHour = now.hour();
+  String ampm = (displayHour >= 12) ? "PM" : "AM";
+  if (displayHour == 0) displayHour = 12; // Midnight
+  else if (displayHour > 12) displayHour -= 12;
 
   // Show Current Time
   display.setTextSize(2);
   display.setCursor(15, 20);
-  if (now.hour() < 10) display.print('0');
-  display.print(now.hour());
+  if (displayHour < 10) display.print('0');
+  display.print(displayHour);
   display.print(':');
   if (now.minute() < 10) display.print('0');
   display.print(now.minute());
+
+  display.setTextSize(1);
+  display.print(ampm);
 
   // Show Alarm Status / Set Mode
   display.setTextSize(1);
   display.setCursor(0, 50);
   
-  bool blink = (millis() % 1000 < 500); // Create a 2Hz blink
+  //bool blink = (millis() % 1000 < 500); // Create a 2Hz blink
 
   if (currentMode == CLOCK) {
     display.print("Alarm: ");
@@ -113,33 +148,33 @@ void updateDisplay(DateTime now) {
   } 
   else if (currentMode == SET_HOUR) {
     display.print("SET HOUR: ");
-    if (blink) {
+    //if (blink) {
       if (alarmHour < 10) display.print('0');
       display.print(alarmHour);
-    }
+    //}
   } 
   else if (currentMode == SET_MIN) {
     display.print("SET MINUTE: ");
-    if (blink) {
+    //if (blink) {
       if (alarmMin < 10) display.print('0');
       display.print(alarmMin);
-    }
+    //}
   }
 
   display.display();
 }
 
 void triggerAlarm() {
-  for(int i=0; i<3; i++) {
-    tone(BUZZER_PIN, 1500, 150); 
+  for(int i=0; i<5; i++) {
+    tone(BUZZER_PIN, 4500, 1000); 
     delay(200);
-    tone(BUZZER_PIN, 1200, 150);
+    tone(BUZZER_PIN, 4500, 1000);
     delay(200);
   }
 }
 
 void loop() {
-  // 1. Cycle Modes on Button Press
+  // Cycle Modes with each button press
   if (digitalRead(ENCODER_SW) == LOW) {
     delay(250); // Debounce
     if (currentMode == CLOCK) currentMode = SET_HOUR;
@@ -151,19 +186,19 @@ void loop() {
     }
   }
 
-  // 2. Adjust Values
+  // Adjust Values
   int change = readEncoder();
   if (change != 0) {
     if (currentMode == SET_HOUR) {
-      alarmHour = (alarmHour + change + 24) % 24;
+      alarmHour = (alarmHour + change + 12) % 12;
     } else if (currentMode == SET_MIN) {
       alarmMin = (alarmMin + change + 60) % 60;
     }
   }
 
-  // 3. Check Alarm
+  // Check if currrent time is alarm time 
   DateTime now = rtc.now();
-  if (now.hour() == alarmHour && now.minute() == alarmMin && now.second() < 1) {
+  if (now.hour() == alarmHour && now.minute() == alarmMin && now.second() < 1) { //only triggers alarm while second is 0, otherwise would trigger 60 times
     triggerAlarm();
   }
 
