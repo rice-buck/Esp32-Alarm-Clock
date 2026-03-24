@@ -31,6 +31,8 @@ Mode currentMode = CLOCK;
 //default alarm values
 int alarmHour = 7;
 int alarmMin = 0;
+bool alarmSounding = false; 
+bool wasAlarmSounding = false;
 
 // 16x16 Alarm Bell Icon
 const unsigned char bell_icon[] PROGMEM = {
@@ -196,18 +198,37 @@ void updateDisplay(DateTime now) {
   display.display();
 }
 
+unsigned long lastBuzzerAction = 0;
+bool buzzerOn = false;
+
 void triggerAlarm() {
-  for(int i=0; i<5; i++) {
-    tone(BUZZER_PIN, 4500, 1000); 
-    delay(1500);
-    tone(BUZZER_PIN, 2500, 500);
-    delay(1500);
+  if (!alarmSounding) {
+    noTone(BUZZER_PIN);
+    return;
+  }
+
+  // Beep every 500ms
+  if (millis() - lastBuzzerAction > 500) {
+    buzzerOn = !buzzerOn;
+    if (buzzerOn) {
+      tone(BUZZER_PIN, 4500); // Start Beep
+    } else {
+      noTone(BUZZER_PIN);     // Stop Beep
+    }
+    lastBuzzerAction = millis();
   }
 }
 
 
 void loop() {
   DateTime now = rtc.now();
+
+  // Check for Alarm trigger
+  if (now.hour() == alarmHour && now.minute() == alarmMin && now.second() < 1 && alarmActive) {
+      alarmSounding = true;
+  }
+
+    if(alarmSounding) triggerAlarm();
 
   // Only needs to update once a second
   if (now.second() != lastSecond) {
@@ -227,32 +248,46 @@ void loop() {
   }
 
  int currentSWstate = digitalRead(ENCODER_SW);
-    // Detect when button is first pressed
-    if (currentSWstate == LOW && lastSWState == HIGH) {
-      pressedTime = millis();
-    }
-    //Detect when button is released
-    else if(currentSWstate == HIGH && lastSWState == LOW){ 
-      long pressDuration = millis() - pressedTime;
-
-      if(pressDuration > LONG_PRESS_TIME){
-        alarmActive = !alarmActive;
+// Detect when button is first pressed
+if (currentSWstate == LOW && lastSWState == HIGH) {
+    if (alarmSounding) {
+        alarmSounding = false; // Silence the alarm
+        noTone(BUZZER_PIN);
+        wasAlarmSounding = true; // Mark this press as a "silence" action
         needsUpdate = true;
-      }
-
-      else if(pressDuration < LONG_PRESS_TIME) {
-      delay(250); 
-      needsUpdate = true; //update when knob is pressed
-      if (currentMode == CLOCK) currentMode = SET_HOUR;
-      else if (currentMode == SET_HOUR) currentMode = SET_MIN;
-      else {
-        currentMode = CLOCK;
-        prefs.putInt("h", alarmHour);
-        prefs.putInt("m", alarmMin);
-        }
-      }
+    } else {
+        wasAlarmSounding = false; // Normal press
+        pressedTime = millis();
     }
-  lastSWState = currentSWstate; //toggle SW state
+}
+// Detect when button is released
+else if (currentSWstate == HIGH && lastSWState == LOW) {
+    if (wasAlarmSounding) {
+        // If we just silenced the alarm, do NOTHING on release
+        wasAlarmSounding = false; 
+    } else {
+        // Normal Menu / Toggle Logic
+        long pressDuration = millis() - pressedTime;
+
+        if (pressDuration > LONG_PRESS_TIME) {
+            alarmActive = !alarmActive;
+            needsUpdate = true;
+        } else {
+            // Short Press: Mode Cycling
+            delay(50); // Small debounce
+            needsUpdate = true;
+            if (currentMode == CLOCK) currentMode = SET_HOUR;
+            else if (currentMode == SET_HOUR) currentMode = SET_MIN;
+            else {
+                currentMode = CLOCK;
+                prefs.putInt("h", alarmHour);
+                prefs.putInt("m", alarmMin);
+            }
+        }
+    }
+}
+lastSWState = currentSWstate;
+
 
   // Only updates the screen when necessary
   if (needsUpdate) {
@@ -260,8 +295,4 @@ void loop() {
     needsUpdate = false; 
   }
 
-  // Trigger Alarm
-  if (now.hour() == alarmHour && now.minute() == alarmMin && now.second() < 1 && alarmActive == true) {
-    triggerAlarm();
-    }
-  }
+}
