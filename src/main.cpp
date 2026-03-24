@@ -25,14 +25,36 @@ RTC_DS3231 rtc;
 Preferences prefs;
 
 //using enums prevent massive if statements and modularity. Allows easy addition of modes without messing up previous modes
-enum Mode { CLOCK, SET_HOUR, SET_MIN };
+enum Mode { CLOCK, SET_HOUR, SET_MIN};
 Mode currentMode = CLOCK;
 
+//default alarm values
 int alarmHour = 7;
 int alarmMin = 0;
+
+// 16x16 Alarm Bell Icon
+const unsigned char bell_icon[] PROGMEM = {
+  0x01, 0x00, 0x03, 0x80, 0x07, 0xc0, 0x07, 0xc0, 0x0f, 0xe0, 0x0f, 0xe0, 
+  0x0f, 0xe0, 0x1f, 0xf0, 0x1f, 0xf0, 0x1f, 0xf0, 0x3f, 0xf8, 0x7f, 0xfc, 
+  0x7f, 0xfc, 0x1f, 0xf0, 0x07, 0xc0, 0x03, 0x80
+};
+
+//Rotation value
 int lastClkState;
+
+//DHT values
 unsigned long lastDHTRead = 0;
 float h = 0, t = 0;
+
+//update screen variables
+bool needsUpdate = false;
+int lastSecond = -1;
+
+//button variables 
+bool alarmActive = true;
+const int LONG_PRESS_TIME = 1000; // milliseconds
+int lastSWState = digitalRead(ENCODER_SW);
+unsigned long pressedTime = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -65,7 +87,7 @@ void setup() {
   alarmHour = prefs.getInt("h", 7);
   alarmMin = prefs.getInt("m", 0);
 
-  lastClkState = digitalRead(ENCODER_CLK);
+  lastClkState = digitalRead(ENCODER_CLK); //HIGH when unpressed
   display.clearDisplay();
 }
 
@@ -73,7 +95,7 @@ void setup() {
 int readEncoder() {
   int change = 0;
   int currentClkState = digitalRead(ENCODER_CLK);
-  
+
   if (currentClkState != lastClkState && currentClkState == LOW) {
     //if CLK and DT are different, the knob moved clockwise
     if (digitalRead(ENCODER_DT) != currentClkState) {
@@ -132,25 +154,35 @@ void updateDisplay(DateTime now) {
   display.setTextSize(1);
   display.print(ampm);
 
-  // Show Alarm Status / Set Mode
+  //display alarm ON/OFF
+  display.setCursor(90, 50);
+  if(alarmActive) display.drawBitmap(110, 45, bell_icon, 16, 16, SSD1306_WHITE);
+
+  //conversions for 12hr time
   display.setTextSize(1);
   display.setCursor(0, 50);
-  
-  //bool blink = (millis() % 1000 < 500); // Create a 2Hz blink
+  int alarmTwelve = alarmHour;
+  String ampmAlarm = (alarmHour >= 12) ? "PM" : "AM";
+  if(alarmTwelve == 0) alarmTwelve = 12; //when midnight
+  else if (alarmTwelve > 12) alarmTwelve -= 12;
 
+  // Show Alarm Status
   if (currentMode == CLOCK) {
     display.print("Alarm: ");
-    if (alarmHour < 10) display.print('0');
-    display.print(alarmHour);
+    if (alarmTwelve < 10) display.print('0');
+    display.print(alarmTwelve);
     display.print(':');
     if (alarmMin < 10) display.print('0');
     display.print(alarmMin);
+    display.print(ampmAlarm);
   } 
+
   else if (currentMode == SET_HOUR) {
     display.print("SET HOUR: ");
     //if (blink) {
-      if (alarmHour < 10) display.print('0');
-      display.print(alarmHour);
+      if (alarmTwelve < 10) display.print('0');
+      display.print(alarmTwelve);
+      display.print(ampmAlarm);
     //}
   } 
   else if (currentMode == SET_MIN) {
@@ -167,40 +199,69 @@ void updateDisplay(DateTime now) {
 void triggerAlarm() {
   for(int i=0; i<5; i++) {
     tone(BUZZER_PIN, 4500, 1000); 
-    delay(200);
-    tone(BUZZER_PIN, 4500, 1000);
-    delay(200);
+    delay(1500);
+    tone(BUZZER_PIN, 2500, 500);
+    delay(1500);
   }
 }
 
+
 void loop() {
-  // Cycle Modes with each button press
-  if (digitalRead(ENCODER_SW) == LOW) {
-    delay(250); // Debounce
-    if (currentMode == CLOCK) currentMode = SET_HOUR;
-    else if (currentMode == SET_HOUR) currentMode = SET_MIN;
-    else {
-      currentMode = CLOCK;
-      prefs.putInt("h", alarmHour);
-      prefs.putInt("m", alarmMin);
-    }
+  DateTime now = rtc.now();
+
+  // Only needs to update once a second
+  if (now.second() != lastSecond) {
+    needsUpdate = true;
+    lastSecond = now.second();
   }
 
-  // Adjust Values
+  // Check if there are any changes on the encoder
   int change = readEncoder();
   if (change != 0) {
+    needsUpdate = true; //update when knob is turned
     if (currentMode == SET_HOUR) {
-      alarmHour = (alarmHour + change + 12) % 12;
+      alarmHour = (alarmHour + change + 24) % 24;
     } else if (currentMode == SET_MIN) {
       alarmMin = (alarmMin + change + 60) % 60;
     }
   }
 
-  // Check if currrent time is alarm time 
-  DateTime now = rtc.now();
-  if (now.hour() == alarmHour && now.minute() == alarmMin && now.second() < 1) { //only triggers alarm while second is 0, otherwise would trigger 60 times
-    triggerAlarm();
+ int currentSWstate = digitalRead(ENCODER_SW);
+    // Detect when button is first pressed
+    if (currentSWstate == LOW && lastSWState == HIGH) {
+      pressedTime = millis();
+    }
+    //Detect when button is released
+    else if(currentSWstate == HIGH && lastSWState == LOW){ 
+      long pressDuration = millis() - pressedTime;
+
+      if(pressDuration > LONG_PRESS_TIME){
+        alarmActive = !alarmActive;
+        needsUpdate = true;
+      }
+
+      else if(pressDuration < LONG_PRESS_TIME) {
+      delay(250); 
+      needsUpdate = true; //update when knob is pressed
+      if (currentMode == CLOCK) currentMode = SET_HOUR;
+      else if (currentMode == SET_HOUR) currentMode = SET_MIN;
+      else {
+        currentMode = CLOCK;
+        prefs.putInt("h", alarmHour);
+        prefs.putInt("m", alarmMin);
+        }
+      }
+    }
+  lastSWState = currentSWstate; //toggle SW state
+
+  // Only updates the screen when necessary
+  if (needsUpdate) {
+    updateDisplay(now);
+    needsUpdate = false; 
   }
 
-  updateDisplay(now);
-}
+  // Trigger Alarm
+  if (now.hour() == alarmHour && now.minute() == alarmMin && now.second() < 1 && alarmActive == true) {
+    triggerAlarm();
+    }
+  }
